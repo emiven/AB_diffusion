@@ -133,4 +133,6 @@ dmypy.json
 
 # ignore data folder
 data/
+#ignore models folder
 models/
+
