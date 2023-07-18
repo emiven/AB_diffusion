@@ -28,7 +28,8 @@ print("Selected GPU:", torch.cuda.current_device())
 model = ABUnet(
     dim = 64,
     out_dim = 2,
-    channels=5,    
+    channels=5,
+    full_attn = (False, False, False, True)    
 
 ).to(device)
 diffusion = ABGaussianDiffusion(
@@ -57,7 +58,7 @@ trainer = ABTrainer(
         gradient_accumulate_every = 2,
         augment_horizontal_flip = False,
         train_lr = 4e-5,
-        train_num_steps = 100000,
+        train_num_steps = 130000,
         ema_update_every = 10,
         ema_decay = 0.995,
         adam_betas = (0.9, 0.99),
@@ -74,12 +75,9 @@ trainer = ABTrainer(
         #ab diffusion stuff
         hint_generator = hint_generator,
         hint_color_avg = True,
-        log_freq = 10000,
-        save_every = 10000,
-        
-        
+        log_freq = 9999,
+        save_every = 9999,
 
         )
-trainer.load(5)
-
+trainer.load(8)
 trainer.train()

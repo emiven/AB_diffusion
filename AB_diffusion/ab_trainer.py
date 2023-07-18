@@ -29,10 +29,10 @@ from denoising_diffusion_pytorch.fid_evaluation import FIDEvaluation
 from denoising_diffusion_pytorch.version import __version__
 
 #ab diffusion related imports
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 
-from user_hints import *
-from color_handling import *
+from AB_diffusion.user_hints import get_color_hints
+from AB_diffusion.color_handling import LAB2RGB
 from IPython.utils import io as iol
 from skimage import io
 from kornia.color import rgb_to_lab, lab_to_rgb
@@ -122,11 +122,8 @@ class ABTrainer(object):
     def __init__(
         self,
         diffusion_model,
-        folder_train,
-        folder_sample,
         train_ds = None,
         sample_ds = None,
-
         *,
         train_batch_size = 16,
         gradient_accumulate_every = 1,
@@ -207,17 +204,13 @@ class ABTrainer(object):
         print("loading datasets:")
         #time to load datasets
         current_time = time.time()
-        if train_ds is None:
-            self.ds_train = ABDataset(load_from_disk(dataset_path=folder_train), self.image_size, augment_horizontal_flip = augment_horizontal_flip) 
-        else:
-            self.ds_train = ABDataset(train_ds,self.image_size, augment_horizontal_flip = augment_horizontal_flip)
+        
+        
+        self.ds_train = ABDataset(train_ds,self.image_size, augment_horizontal_flip = augment_horizontal_flip)
         print("time to load train dataset: ", time.time() - current_time)
         print("train dataset length: ", len(self.ds_train))
         current_time = time.time()
-        if sample_ds is None:
-            self.ds_sample = ABDataset(load_from_disk(dataset_path=folder_sample), self.image_size, augment_horizontal_flip = augment_horizontal_flip)
-        else:
-            self.ds_sample = ABDataset(sample_ds, self.image_size, augment_horizontal_flip = augment_horizontal_flip)
+        self.ds_sample = ABDataset(sample_ds, self.image_size, augment_horizontal_flip = augment_horizontal_flip)
         print("time to load sample dataset: ", time.time() - current_time)
         print("sample dataset length: ", len(self.ds_sample))
         
