@@ -135,4 +135,5 @@ dmypy.json
 data/
 #ignore models folder
 models/
-
+#ignore .pt files
+*.pt
