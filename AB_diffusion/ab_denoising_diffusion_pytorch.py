@@ -1,24 +1,23 @@
 import math
-from random import random
 from functools import partial
 from collections import namedtuple
-from multiprocessing import cpu_count
 import torch
-from torch import nn, einsum
+from torch import nn
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
 from tqdm.auto import tqdm
-from denoising_diffusion_pytorch.attend import Attend
+from AB_diffusion.attend import Attend
 
-# This file is based on the code from the Denoising Diffusion Probabilistic Model Pytorch implementation by Phil Wang,
-# And aproptiated for the diffusion colorizer model by me.
+# This file consists of lightly modified code from a Denoising Diffusion Probabilistic Model Pytorch implementation by Phil Wang,
 # Original Source: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
+# includes the code for the U-Net and the diffusion model
 # 
-# Modifications made:
+# Modifications made:(not very many)
 # - added support for conditioning with the user hints and L component
 # - removed some of the code and functionality that was not needed for the colorizer such as normalizing, DDIM sampling, self-conditioning, etc.
+# - renaming classes and functions
 
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -333,7 +332,7 @@ class ABUnet(nn.Module):
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
-    def forward(self, x, time,conditioning, x_self_cond = None):
+    def forward(self, x, time,conditioning):
         
         x = torch.cat((x, conditioning), dim = 1)
         
@@ -373,7 +372,6 @@ class ABUnet(nn.Module):
         x = self.final_res_block(x, t)
         return self.final_conv(x)
 
-# gaussian diffusion trainer class
 
 def extract(a, t, x_shape):
     b, *_ = t.shape
@@ -417,16 +415,20 @@ def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1
     return torch.clip(betas, 0, 0.999)
 
 class ABGaussianDiffusion(nn.Module):
+    """
+    Gaussian diffusion model
+
+    Conditioned on the L component of the image and user hint mask
+    """
     def __init__(
         self,
         u_net,
         *,
         image_size,
-        timesteps = 1000,
-        sampling_timesteps = None,
+        timesteps = 1000,  # number of timesteps to sample from
         objective = 'pred_v',
         beta_schedule = 'sigmoid',
-        schedule_fn_kwargs = dict(),
+        schedule_fn_kwargs = dict(), # beta schedule kwargs
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
         min_snr_gamma = 5
@@ -464,12 +466,9 @@ class ABGaussianDiffusion(nn.Module):
 
         # sampling related parameters
 
-        self.sampling_timesteps = default(sampling_timesteps, timesteps) # default num sampling timesteps to number of timesteps at training
-        print('sampling timesteps', self.sampling_timesteps)
         print('timesteps', timesteps)
-        #trow error if sampling self.sampling_timesteps <= timesteps
-        assert not self.sampling_timesteps != timesteps, 'sampling timesteps must be equal to timesteps'
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
+
+
 
         # helper function to register buffer from float64 to float32
 
@@ -562,8 +561,8 @@ class ABGaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def model_predictions(self, x, t,conditioning, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
-        model_output = self.model(x, t,conditioning, x_self_cond)
+    def model_predictions(self, x, t,conditioning, clip_x_start = False, rederive_pred_noise = False):
+        model_output = self.model(x, t,conditioning)
         maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
 
         if self.objective == 'pred_noise':
@@ -587,8 +586,8 @@ class ABGaussianDiffusion(nn.Module):
 
         return ModelPrediction(pred_noise, x_start)
 
-    def p_mean_variance(self, x, t,conditioning, x_self_cond = None, clip_denoised = True):
-        preds = self.model_predictions(x, t,conditioning, x_self_cond)
+    def p_mean_variance(self, x, t,conditioning, clip_denoised = True):
+        preds = self.model_predictions(x, t,conditioning)
         x_start = preds.pred_x_start
 
         if clip_denoised:
@@ -598,7 +597,18 @@ class ABGaussianDiffusion(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.inference_mode()
-    def p_sample(self, x, t: int,conditioning, x_self_cond = None):
+    # Sample step t-1
+    def p_sample(self, x, t: int,conditioning):
+        """
+        Sample from the reverse diffusion process at a particular timestep.
+        Args:
+            x (torch.Tensor): the noised AB values of at timestep t+1, shape (batch_size, 2, height, width)
+
+            t (int): the timestep to sample from
+
+            conditioning (torch.Tensor): the conditioning consiting of L component of images, together with the user hint masks, shape (batch_size, 3, height, width)
+
+        """
 
         b, *_, device = *x.shape, self.device
         batched_times = torch.full((b,), t, device = device, dtype = torch.long)
@@ -606,13 +616,14 @@ class ABGaussianDiffusion(nn.Module):
         model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x,
                                                                            t = batched_times,
                                                                            conditioning=conditioning, 
-                                                                           x_self_cond = x_self_cond, 
                                                                            clip_denoised = True)
         noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
     
     @torch.inference_mode()
+
+    # sample loop from T to 0
     def p_sample_loop(self,conditioning, shape, return_all_timesteps = False):
         batch, device = shape[0], self.device
 
@@ -622,8 +633,7 @@ class ABGaussianDiffusion(nn.Module):
         x_start = None
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
-            self_cond = None
-            img, x_start = self.p_sample(img, t,conditioning, self_cond)
+            img, x_start = self.p_sample(img, t,conditioning)
             imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
@@ -634,21 +644,39 @@ class ABGaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def sample(self,conditioning, return_all_timesteps = False):
+        """
+        Generate samples from the reverse diffusion process.
+        Args:
+            conditioning (torch.Tensor): the conditioning consiting of L component of images, together with the user hint masks, shape (batch_size, 3, height, width)
+            return_all_timesteps (bool): whether to return all timesteps or just the last one
+        Returns:
+            torch.Tensor: the generated AB values of the conditioning image, shape (batch_size, 2, height, width)
+        """
         batch_size,height,width, channels = conditioning.shape[0], conditioning.shape[-2],conditioning.shape[-1], self.channels
 
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
+        sample_fn = self.p_sample_loop
         return sample_fn(conditioning,(batch_size, channels, height, width), return_all_timesteps = return_all_timesteps)
     
     
     #sampling from a specific timestep
     def sample_from_t(self,conditioning, x,time_step, return_all_timesteps = False):
+        """
+        Generate samples from particular timestep of the reverse diffusion process. may be usefull for image editing, more testing needed
+        Args:
+            conditioning (torch.Tensor): the conditioning consiting of L component of images, together with the user hint masks, shape (batch_size, 3, height, width)
+            x (torch.Tensor): the AB values of the conditioning image, shape (batch_size, 2, height, width)
+            time_step (int): the timestep to sample from
+            return_all_timesteps (bool): whether to return all timesteps or just the last one
+        Returns:
+            torch.Tensor: the generated AB values of the conditioning image, shape (batch_size, 2, height, width)
+        """
         batch_size,height,width, channels = conditioning.shape[0], conditioning.shape[-2],conditioning.shape[-1], self.channels
         shape = (batch_size, channels, height, width)
         batch, device = shape[0], self.device
         # noise sample
         batched_time = torch.full((1,), time_step, device = device, dtype = torch.long)
 
-
+        # apply noise to image
         x = self.q_sample(x_start = x, t = batched_time)
         img = x.clone()
         imgs = [img]
@@ -657,8 +685,8 @@ class ABGaussianDiffusion(nn.Module):
 
 
         for t in tqdm(reversed(range(0, time_step)), desc = f"sampling from timestep {time_step} / {self.num_timesteps}", total = self.num_timesteps):
-            self_cond = None
-            img, x_start = self.p_sample(img, t,conditioning, self_cond)
+
+            img, x_start = self.p_sample(img, t,conditioning)
             imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
@@ -689,6 +717,15 @@ class ABGaussianDiffusion(nn.Module):
 
     @autocast(enabled = False)
     def q_sample(self, x_start, t, noise = None):
+        """
+        Sampling et noise from the forward diffusion process
+        Args:
+            x_start (torch.Tensor): the AB values of a image, shape (batch_size, 2, height, width)
+            t (torch.Tensor): the timestep to sample from, shape (batch_size,)
+            noise (torch.Tensor): the noise to sample from, shape (batch_size, 2, height, width)
+        Returns:
+            torch.Tensor: the noised AB values of a image, shape (batch_size, 2, height, width)
+        """
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         return (
@@ -696,9 +733,10 @@ class ABGaussianDiffusion(nn.Module):
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
+    # model prediction and loss computation
     def p_losses(self, x_start, t,conditioning, noise = None, offset_noise_strength = None):
         b, c, h, w = x_start.shape
-
+        
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         # offset noise - https://www.crosslabs.org/blog/diffusion-with-offset-noise
@@ -712,20 +750,9 @@ class ABGaussianDiffusion(nn.Module):
         # noise sample
 
         x = self.q_sample(x_start = x_start, t = t, noise = noise)
+    
 
-        # if doing self-conditioning, 50% of the time, predict x_start from current set of times
-        # and condition with unet with that
-        # this technique will slow down training by 25%, but seems to lower FID significantly
-
-        x_self_cond = None
-        if self.self_condition and random() < 0.5:
-            with torch.inference_mode():
-                x_self_cond = self.model_predictions(x, t).pred_x_start
-                x_self_cond.detach_()
-
-        # predict and take gradient step
-
-        model_out = self.model(x, t,conditioning, x_self_cond)
+        model_out = self.model(x, t,conditioning, None)
 
         if self.objective == 'pred_noise':
             target = noise

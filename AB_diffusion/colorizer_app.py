@@ -1,5 +1,4 @@
-import skimage.color as skcolor
-import kornia.color as kacolor
+
 from ipyevents import Event
 import io
 import numpy as np
@@ -8,14 +7,20 @@ import torch
 from torchvision import transforms
 import ipywidgets as widgets
 from IPython.display import display
-from AB_diffusion import normalize_lab, de_normalize_lab
+from AB_diffusion.color_handling import normalize_lab, de_normalize_lab, PointColorConversions
+import kornia.color as kacolor
+
 
 
 class ModelWrapper:
+    """
+    Wrapper class for the ABUnet model.
+    """
     def __init__(self, model, device="cpu"):
         self.model = model
         self.device = device
 
+    # Colorizes the greyscaøe image when user clics the colorize button
     def colorize(self, input_image_L_tensor, user_hints_tensor, output_count):
         conditioning = torch.cat([input_image_L_tensor, user_hints_tensor], dim=1)
         conditioning = conditioning.repeat(output_count, 1, 1, 1)
@@ -24,8 +29,11 @@ class ModelWrapper:
 
         self.colorization_LAB_tensor = de_normalize_lab(torch.cat([conditioning[:, :1, :, :], output_AB.to("cpu")], dim=1))
 
-    
+# Handles the image processing and conversions   
 class ImageProcessor:
+    """
+    A class for handling image operations for the colorizer app.
+    """
     def __init__(self, image):
         self.image = image.copy()
         self.input_image_LAB_tensor = self.convert_to_lab_tensor(self.image.copy())
@@ -42,15 +50,8 @@ class ImageProcessor:
         return output_image
 
     def apply_hints_to_image(self, x, y, color, sampling_size):
-        # Your existing code here, modified to work with the new structure.
-        # The code should update self.user_hints_tensor based on the x, y, color, and sampling_size parameters.    
+        
         color_lab = self.point_color_conversions.hex_to_lab(color)
-        print(color)
-        print(color_lab)
-        print(sampling_size)
-        print(x)
-        print(y)
-
     
         half_sampling = sampling_size // 2
 
@@ -59,7 +60,6 @@ class ImageProcessor:
         x_end = min(self.image.width, x + half_sampling)
         y_end = min(self.image.height, y + half_sampling)
     
-        # Create blank image tensor
         # Apply color to image tensor
         self.user_hints_tensor[:,0,y_start:y_end,x_start:x_end] = color_lab[1]
         self.user_hints_tensor[:,1,y_start:y_end,x_start:x_end] = color_lab[2]
@@ -79,6 +79,9 @@ class ImageProcessor:
         return self.lab_tensor_to_image(temp_lab)
 
 class WidgetManager:
+    """
+    A class for managing layout, widgets and their functionality.
+    """
     def __init__(self, image_processor, model_wrapper):
         self.image_processor = image_processor
         self.model_wrapper = model_wrapper
@@ -103,13 +106,10 @@ class WidgetManager:
         input_image_label = widgets.Label('Input Image')
         colorization_label = widgets.Label('Colorization')
 
-        # Create a layout for original and colorized images
         input_image_box = widgets.VBox([input_image_label, self.image_widget])
-
-        # Put the colorized image grid in a VBox with an empty Label to push it to the bottom
         colorized_image_grid_box = widgets.VBox([widgets.Label('Click to select'), self.colorized_image_grid])
     
-        # Create a box for the main colorized image and the grid
+
         colorization_box = widgets.HBox([widgets.VBox([colorization_label, self.main_colorized_image_widget]), colorized_image_grid_box], box_style='info')
 
         image_layout = widgets.HBox([
@@ -127,20 +127,20 @@ class WidgetManager:
             self.export_button,
         ])
 
-        # Combine the layouts
         layout = widgets.VBox([image_layout,control_layout])
-
-        # Display the layout
         display(layout)
+
+    # Creates the additional colorized image grid    
     def create_colorized_image_grid(self):
         colorized_image_grid = widgets.GridBox([], layout=widgets.Layout(grid_template_columns="repeat(3, 100px)"),align_items='center')
         return colorized_image_grid
-
+    
+    # "Main" colorized image widget
     def create_main_colorized_image_widget(self):
         main_colorized_image_widget = widgets.Image(format='png',description='Colorized Image')
         main_colorized_image_widget.layout = widgets.Layout(object_fit='contain', height='auto', width='300px')
         return main_colorized_image_widget
-    
+    # Wigdet for the loaded input image
     def create_image_widget(self):
         
         image_widget = widgets.Image(format='png',description='Input Image')
@@ -183,7 +183,6 @@ class WidgetManager:
         # Get the image data from the widget
         image_data = self.main_colorized_image_widget.value
 
-        # Check if image_data is not empty
         if not image_data:
             print("No image data to export.")
             return
@@ -202,7 +201,8 @@ class WidgetManager:
             print(f"Image exported as {filename}.")
         except IOError:
             print(f"Cannot save image as {filename}.")
-
+    
+    # Additional image wigdets for multiple colorizations, attached with an click event for selection
     def create_colorized_image_widget(self, image_bytes):
         img_widget = widgets.Image(value=image_bytes, format='png')
         img_widget.layout = widgets.Layout(object_fit='contain', height='auto', width='100px')
@@ -220,7 +220,7 @@ class WidgetManager:
         self.image_widget.value = self.to_bytes(self.image_processor.get_hinted_image())
     
 
-
+    # Handles the colorization process, updates the widgets with the colorized images
     def on_colorize_button_click(self, _):
         input_image_L_tensor, user_hints_tensor = self.image_processor.get_input_tensors()
         output_count = self.output_count_slider.value
@@ -228,13 +228,13 @@ class WidgetManager:
         self.model_wrapper.colorize(input_image_L_tensor, user_hints_tensor, output_count)
     
         model_output_LAB_tensor = self.model_wrapper.colorization_LAB_tensor
-        # Convert the colorized images from tensors to PIL images, and then to bytes
+        # Convert the colorized images from tensors ->to bytes
         self.colorized_images_bytes = [self.to_bytes(self.image_processor.lab_tensor_to_image(img)) for img in model_output_LAB_tensor]
     
-        # Update the main colorized image widget with the first colorized image
+        # Main colorized image widget gets the first colorized image
         self.main_colorized_image_widget.value = self.colorized_images_bytes[0]
     
-        # Create an image widget for each additional colorization
+        # Widgets for additional colorizations
         additional_colorizations_widgets = []
 
         if output_count > 1:
@@ -242,13 +242,15 @@ class WidgetManager:
                 img_widget = self.create_colorized_image_widget(img_bytes)
                 additional_colorizations_widgets.append(img_widget)
     
-        # Update the grid with the additional colorizations
+        # Update the grid
         self.colorized_image_grid.children = additional_colorizations_widgets
     
+    # Updates the main colorized image widget with the clicked image
     def on_additional_colorization_click(self, image_bytes):
-        # Update the main colorized image widget with the clicked image
+        
         self.main_colorized_image_widget.value = image_bytes
     
+    # Handles the click event on the input image widget, and application of user hints to the image
     def on_image_click(self, event):
         x = event['dataX']
         y = event['dataY']
@@ -259,12 +261,16 @@ class WidgetManager:
 
         hinted_image = self.image_processor.get_hinted_image()
         self.image_widget.value = self.to_bytes(hinted_image)
+    
     def to_bytes(self, pil_image):
         byte_arr = io.BytesIO()
         pil_image.save(byte_arr, format='PNG')
         return byte_arr.getvalue()
 
 class ColorizerApp:
+    """
+    A class for running the colorizer app.
+    """ 
     def __init__(self, image, model, device="cpu"):
         self.image_processor = ImageProcessor(image)
         self.model_wrapper = ModelWrapper(model, device)
@@ -273,31 +279,4 @@ class ColorizerApp:
     def run(self):
         self.widget_manager.display()
 
-class PointColorConversions:
-    def __init__(self):
-        pass
 
-    def rgb_to_hex(self, color_rgb):
-        return '#%02x%02x%02x' % color_rgb
-    
-    def hex_to_rgb(self, color_hex):
-        color_hex = color_hex.lstrip('#')
-        return tuple(int(color_hex[i:i+2], 16) for i in (0, 2, 4))
-
-    def rgb_to_lab(self, color_rgb):
-        color_rgb = np.array(color_rgb).reshape(1, 1, 3) / 255.0
-        color_lab = skcolor.rgb2lab(color_rgb)
-        return tuple(color_lab[0, 0])
-
-    def lab_to_rgb(self, color_lab):
-        color_lab = np.array(color_lab).reshape(1, 1, 3)
-        color_rgb = skcolor.lab2rgb(color_lab)
-        return tuple((color_rgb[0, 0] * 255).astype(int))
-
-    def hex_to_lab(self, color_hex):
-        color_rgb = np.array(self.hex_to_rgb(color_hex)) / 255.0
-        return skcolor.rgb2lab(color_rgb.reshape(1, 1, 3))[0, 0]
-
-    def lab_to_hex(self, color_lab):
-        color_rgb = self.lab_to_rgb(color_lab)
-        return self.rgb_to_hex(color_rgb)

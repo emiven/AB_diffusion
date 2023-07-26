@@ -19,10 +19,9 @@ import math
 
 from AB_diffusion.color_handling import LAB2RGB
 from AB_diffusion.user_hints import get_color_hints
-from denoising_diffusion_pytorch.version import __version__
 
 # This file is based on the code from the Denoising Diffusion Probabilistic Model Pytorch implementation by Phil Wang
-# Specifically the trainer class andrelevant helpers
+# Specifically the trainer class and relevant helpers
 # And aproptiated for the diffusion colorizer model by me.
 # Original Source: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
 # 
@@ -31,10 +30,10 @@ from denoising_diffusion_pytorch.version import __version__
 # - Modified train() to support the AB colorizer model
 # - Refactored train(), image sampling is done in a separate function, added validation function
 # - New dataset class for the AB colorizer
-# - removed some of the code and functionality that was not needed for my project such as the FID calculation
+# - Removed some of the code and functionality that was not needed for my project such as the FID calculation
 
 
-
+# Helper functions
 def exists(x):
     return x is not None
 
@@ -68,6 +67,13 @@ def has_int_squareroot(num):
 
 
 class ABDataset(Dataset):
+    """
+    Dataset class for the AB colorizer model
+    
+    Convert images to LAB color space, normalize to [-1,1] as per https://arxiv.org/abs/2006.11239
+    
+    Support for data augmentation, would not recommend using it for natural image datasets due to color jittering
+    """
     def __init__(
         self,
         dataset,
@@ -110,6 +116,15 @@ class ABDataset(Dataset):
 # trainer class
 
 class ABTrainer(object):
+    """
+    Trainer class for the AB colorizer model
+
+    Original source: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
+
+    Modified to support the AB colorizer model
+
+    """
+
     def __init__(
         self,
         diffusion_model,
@@ -274,9 +289,8 @@ class ABTrainer(object):
             'model': self.accelerator.get_state_dict(self.model),
             'opt': self.opt.state_dict(),
             'ema': self.ema.state_dict(),
-            'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
-            'version': __version__
-        }
+            'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None
+                            }
 
         filename = f"model-{self.model.objective}-{self.model.sampling_timesteps}-{self.model.beta_schedule}-{self.model.image_size}-{milestone}x{self.save_every}steps.pt"
         torch.save(data, str(self.results_folder / filename))
@@ -296,8 +310,6 @@ class ABTrainer(object):
         if self.accelerator.is_main_process:
             self.ema.load_state_dict(data["ema"])
 
-        if 'version' in data:
-            print(f"loading from version {data['version']}")
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
@@ -317,14 +329,13 @@ class ABTrainer(object):
                 for _ in range(self.gradient_accumulate_every):
 
                     imgL,imgAB = next(self.dl_train)
-                    conditioning = imgL.to(device)
                     imgAB = imgAB.to(device)
 
                     with self.accelerator.autocast():
 
                         hint_masks = self.hint_generator(imgAB.shape[0])
                         hints = get_color_hints(imgAB, hint_masks, avg_color = self.hint_color_avg, device = device).to(device)
-                        conditioning = torch.cat([conditioning, hints], dim = 1)
+                        conditioning = torch.cat([imgL.to(device), hints], dim = 1)
 
                             
                         loss = self.model(imgAB,conditioning = conditioning)
@@ -448,9 +459,8 @@ class ABTrainer(object):
         images_hint_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_hint_list], dim = 0)
         images_pred_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_pred_list],dim = 0)
         images_original_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_original_list],dim = 0)
-        print(images_hint_rgb.shape)
-        print(images_pred_rgb.shape)
-        print(images_original_rgb.shape)
+
+
         hint_grid = utils.make_grid(images_hint_rgb, nrow=int(math.sqrt(self.val_batch_size)))
         pred_grid = utils.make_grid(images_pred_rgb, nrow=int(math.sqrt(self.val_batch_size)))
         original_grid = utils.make_grid(images_original_rgb, nrow=int(math.sqrt(self.val_batch_size)))

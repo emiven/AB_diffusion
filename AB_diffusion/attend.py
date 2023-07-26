@@ -5,8 +5,10 @@ from collections import namedtuple
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
-
 from einops import rearrange
+
+
+# Straight from from Phil Wang's DDPM implementation, no modifications: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/attend.py
 
 # constants
 

@@ -60,8 +60,8 @@ def create_adam_optimizer(model, param_names, learning_rate_pretrained, learning
     return optimizer
 
 # Function to reinitialize specific layers in a model
-def reinit_layers(model, param_names):
-    """Reinitializes specific layers in a model.
+def reinit_params(model, param_names):
+    """Reinitializes specific params in a model.
 
     Args:
         model (nn.Module): The model whose layers will be reinitialized.
