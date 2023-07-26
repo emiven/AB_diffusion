@@ -1,47 +1,27 @@
 import math
-import copy
-from pathlib import Path
 from random import random
 from functools import partial
 from collections import namedtuple
 from multiprocessing import cpu_count
-
 import torch
 from torch import nn, einsum
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-
-from torch.optim import Adam
-
-from torchvision import transforms as T, utils
-
-from einops import rearrange, reduce, repeat
+from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
-
-from PIL import Image
 from tqdm.auto import tqdm
-from ema_pytorch import EMA
-
-from accelerate import Accelerator
-
 from denoising_diffusion_pytorch.attend import Attend
-from denoising_diffusion_pytorch.fid_evaluation import FIDEvaluation
 
-from denoising_diffusion_pytorch.version import __version__
+# This file is based on the code from the Denoising Diffusion Probabilistic Model Pytorch implementation by Phil Wang,
+# And aproptiated for the diffusion colorizer model by me.
+# Original Source: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
+# 
+# Modifications made:
+# - added support for conditioning with the user hints and L component
+# - removed some of the code and functionality that was not needed for the colorizer such as normalizing, DDIM sampling, self-conditioning, etc.
 
-# constants
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
-
-# helpers functions
-def plotMinMax(Xsub):
-    labels=["C{}".format(i) for i in range(Xsub.shape[1])]
-    print("______________________________")
-    for i, lab in enumerate(labels):
-        mi = torch.min(Xsub[:, i, :, :])
-        ma = torch.max(Xsub[:, i, :, :])
-        print("{} : MIN={:8.4f}, MAX={:8.4f}".format(lab, mi.item(), ma.item()))
 
 def exists(x):
     return x is not None
@@ -80,13 +60,6 @@ def convert_image_to_fn(img_type, image):
         return image.convert(img_type)
     return image
 
-# normalization functions
-
-def normalize_to_neg_one_to_one(img):
-    return img * 2 - 1
-
-def unnormalize_to_zero_to_one(t):
-    return (t + 1) * 0.5
 
 # small helper modules
 
@@ -269,7 +242,6 @@ class ABUnet(nn.Module):
         out_dim = None,
         dim_mults = (1, 2, 4, 8),
         channels = 3,
-        self_condition = False,
         resnet_block_groups = 8,
         learned_variance = False,
         learned_sinusoidal_cond = False,
@@ -283,8 +255,7 @@ class ABUnet(nn.Module):
         # determine dimensions
 
         self.channels = channels
-        self.self_condition = self_condition
-        input_channels = channels * (2 if self_condition else 1)
+        input_channels = channels
 
         init_dim = default(init_dim, dim)
         self.init_conv = nn.Conv2d(input_channels, init_dim, 7, padding = 3)
@@ -365,12 +336,6 @@ class ABUnet(nn.Module):
     def forward(self, x, time,conditioning, x_self_cond = None):
         
         x = torch.cat((x, conditioning), dim = 1)
-
-
-        if self.self_condition:
-            x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim = 1)
-
         
         x = self.init_conv(x)
         r = x.clone()
@@ -454,7 +419,7 @@ def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1
 class ABGaussianDiffusion(nn.Module):
     def __init__(
         self,
-        model,
+        u_net,
         *,
         image_size,
         timesteps = 1000,
@@ -462,22 +427,18 @@ class ABGaussianDiffusion(nn.Module):
         objective = 'pred_v',
         beta_schedule = 'sigmoid',
         schedule_fn_kwargs = dict(),
-        ddim_sampling_eta = 0.,
-        auto_normalize = False,
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
         min_snr_gamma = 5
     ):
         super().__init__()
-        assert not model.random_or_learned_sinusoidal_cond
+        assert not u_net.random_or_learned_sinusoidal_cond
 
-        self.model = model
+        self.model = u_net
 
         self.channels = self.model.out_dim
-        self.self_condition = self.model.self_condition
 
         self.image_size = image_size
-
         self.objective = objective
         self.beta_schedule = beta_schedule
         
@@ -509,7 +470,6 @@ class ABGaussianDiffusion(nn.Module):
         #trow error if sampling self.sampling_timesteps <= timesteps
         assert not self.sampling_timesteps != timesteps, 'sampling timesteps must be equal to timesteps'
         self.is_ddim_sampling = self.sampling_timesteps < timesteps
-        self.ddim_sampling_eta = ddim_sampling_eta
 
         # helper function to register buffer from float64 to float32
 
@@ -563,10 +523,7 @@ class ABGaussianDiffusion(nn.Module):
         elif objective == 'pred_v':
             register_buffer('loss_weight', maybe_clipped_snr / (snr + 1))
 
-        # auto-normalization of data [0, 1] -> [-1, 1] - can turn off by setting it to be False
 
-        self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
-        self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
 
     @property
     def device(self):
@@ -643,7 +600,6 @@ class ABGaussianDiffusion(nn.Module):
     @torch.inference_mode()
     def p_sample(self, x, t: int,conditioning, x_self_cond = None):
 
-        #MÅ SJEKKE HVA MENES MED BATCHED
         b, *_, device = *x.shape, self.device
         batched_times = torch.full((b,), t, device = device, dtype = torch.long)
         
@@ -666,78 +622,33 @@ class ABGaussianDiffusion(nn.Module):
         x_start = None
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
-            self_cond = x_start if self.self_condition else None
+            self_cond = None
             img, x_start = self.p_sample(img, t,conditioning, self_cond)
             imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
-        ret = self.unnormalize(ret)
         return ret
 
-    @torch.inference_mode()
 
-    #not supported yet
-    def ddim_sample(self, shape, return_all_timesteps = False):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
-
-        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
-        times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
-
-        img = torch.randn(shape, device = device)
-        imgs = [img]
-
-        x_start = None
-
-        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
-            self_cond = x_start if self.self_condition else None
-            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
-
-            if time_next < 0:
-                img = x_start
-                imgs.append(img)
-                continue
-
-            alpha = self.alphas_cumprod[time]
-            alpha_next = self.alphas_cumprod[time_next]
-
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
-
-            noise = torch.randn_like(img)
-
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
-
-            imgs.append(img)
-
-        ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
-
-        ret = self.unnormalize(ret)
-        return ret
 
     @torch.inference_mode()
     def sample(self,conditioning, return_all_timesteps = False):
-        batch_size,image_size, channels = conditioning.shape[0], self.image_size, self.channels
-        #print("conditioning in sample()")
-        #plotMinMax(conditioning)
+        batch_size,height,width, channels = conditioning.shape[0], conditioning.shape[-2],conditioning.shape[-1], self.channels
 
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn(conditioning,(batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps)
+        return sample_fn(conditioning,(batch_size, channels, height, width), return_all_timesteps = return_all_timesteps)
     
     
     #sampling from a specific timestep
     def sample_from_t(self,conditioning, x,time_step, return_all_timesteps = False):
-        batch_size,image_size, channels = conditioning.shape[0], self.image_size, self.channels
-        shape = (batch_size, channels, image_size, image_size)
+        batch_size,height,width, channels = conditioning.shape[0], conditioning.shape[-2],conditioning.shape[-1], self.channels
+        shape = (batch_size, channels, height, width)
         batch, device = shape[0], self.device
         # noise sample
         batched_time = torch.full((1,), time_step, device = device, dtype = torch.long)
-        #noising image according to timestep
-        print(batched_time)
+
+
         x = self.q_sample(x_start = x, t = batched_time)
         img = x.clone()
         imgs = [img]
@@ -746,36 +657,35 @@ class ABGaussianDiffusion(nn.Module):
 
 
         for t in tqdm(reversed(range(0, time_step)), desc = f"sampling from timestep {time_step} / {self.num_timesteps}", total = self.num_timesteps):
-            self_cond = x_start if self.self_condition else None
+            self_cond = None
             img, x_start = self.p_sample(img, t,conditioning, self_cond)
             imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
-        ret = self.unnormalize(ret)
 
 
-        return ret,x
-    @torch.inference_mode()
-    #not supported yet
-    def interpolate(self, x1, x2, t = None, lam = 0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = default(t, self.num_timesteps - 1)
+        return ret
+    # @torch.inference_mode()
+    # #not supported yet
+    # def interpolate(self, x1, x2, t = None, lam = 0.5):
+    #     b, *_, device = *x1.shape, x1.device
+    #     t = default(t, self.num_timesteps - 1)
 
-        assert x1.shape == x2.shape
+    #     assert x1.shape == x2.shape
 
-        t_batched = torch.full((b,), t, device = device)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t = t_batched), (x1, x2))
+    #     t_batched = torch.full((b,), t, device = device)
+    #     xt1, xt2 = map(lambda x: self.q_sample(x, t = t_batched), (x1, x2))
 
-        img = (1 - lam) * xt1 + lam * xt2
+    #     img = (1 - lam) * xt1 + lam * xt2
 
-        x_start = None
+    #     x_start = None
 
-        for i in tqdm(reversed(range(0, t)), desc = 'interpolation sample time step', total = t):
-            self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, i, self_cond)
+    #     for i in tqdm(reversed(range(0, t)), desc = 'interpolation sample time step', total = t):
+    #         self_cond = None
+    #         img, x_start = self.p_sample(img, i, self_cond)
 
-        return img
+    #     return img
 
     @autocast(enabled = False)
     def q_sample(self, x_start, t, noise = None):
@@ -834,11 +744,10 @@ class ABGaussianDiffusion(nn.Module):
         return loss.mean()
 
     def forward(self, img,conditioning, *args, **kwargs):
-        b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
+        b, c, h, w, device, img_size, = *img.shape, img.device, conditioning.shape[-1]
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
 
-        img = self.normalize(img)
         return self.p_losses(img, t,conditioning, *args, **kwargs)
 
 
