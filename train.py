@@ -1,21 +1,12 @@
 from AB_diffusion import ABTrainer,ABGaussianDiffusion,RandomHintGenerator,ABUnet
-import matplotlib.pyplot as plt
 import torch
-from multiprocessing import cpu_count
-import os
 from datasets import load_dataset
-from datasets import Dataset as HFDataset
-from torchvision.datasets import ImageFolder
-from torchviz import make_dot
-from torchsummary import summary
-from AB_diffusion.ab_fine_tuner import copy_layers,freeze_layers,create_adam_optimizer,reinit_layers
+
 
 #loa dimagenet
-dataset_train = load_dataset("imagenet-1k",split="train")
-dataset_test = load_dataset("imagenet-1k",split="validation")
+dataset_train = load_dataset("zh-plus/tiny-imagenet",split="train")#load_dataset("imagenet-1k",split="train")
+dataset_test = load_dataset("zh-plus/tiny-imagenet",split="valid")#load_dataset("imagenet-1k",split="validation")
 
-train_folder = "data/tinyimgnet/train"
-test_folder = "data/tinyimgnet/val"
 device = torch.device(7 if torch.cuda.is_available() else "cpu")
 print("Selected GPU:", torch.cuda.get_device_name(device))
 #check wicj gpu is selected
@@ -34,18 +25,15 @@ model = ABUnet(
 ).to(device)
 diffusion = ABGaussianDiffusion(
     model,
-        image_size = 256,
+        image_size = 64,
         timesteps = 1000,
-        objective = 'pred_v',
-        beta_schedule = 'sigmoid',
-        auto_normalize=False
+        objective = 'pred_noise',
+        beta_schedule = 'cosine',
 ).to(device)
 
 hint_generator = RandomHintGenerator(
-    input_size = 256,
-    hint_size = 4,
-    num_hint_range = [0, 10]
-    
+    input_size = 64,
+    hint_size = 2    
 )
 
 trainer = ABTrainer(
@@ -53,29 +41,29 @@ trainer = ABTrainer(
         ds_train = dataset_train,
         ds_val = dataset_test,
 
-        train_batch_size = 32,
-        val_batch_size = 25,
-        gradient_accumulate_every = 2,
-        augment_data = False,
-        train_lr = 7e-5,
+        train_batch_size = 100,
+        val_batch_size = 100,
+        train_lr = 1e-4,
         train_num_steps = 100000,
-        val_num_steps = 300,
-
-        ema_update_every = 2,
+        val_num_steps = 100,
+        ema_update_every = 10,
         ema_decay = 0.995,
         adam_betas = (0.9, 0.99),
         
-        amp = False,
-        mixed_precision_type = 'fp16',
+        results_folder = './results',
+        results_prefix = 'test',
+        save_images_to_disk = True,
+
         #ab diffusion stuff
         hint_generator = hint_generator,
         
         #logging saving, samplig details
-        sample_image_every= 1000,
-        save_every = 10000,
-        validation_every = 1000,
-        num_image_samples = 25,
-        use_tensorboard=True,
+        sample_image_every= 5000,
+        save_every = 20000,
+        validation_every = 2000,
+        num_image_samples = 49,
+        use_tensorboard=False,
+        eval_automatic_generation = True
 
         )
 trainer.train()

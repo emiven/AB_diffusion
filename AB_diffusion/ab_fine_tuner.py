@@ -53,6 +53,7 @@ def create_adam_optimizer(model, param_names, learning_rate_pretrained, learning
     for name, param in model.named_parameters():
         if any(param_name in name for param_name in param_names):
             parameters.append({'params': param, 'lr': learning_rate_reinit})
+            print(f'Using learning rate {learning_rate_reinit} for layer {name}')
         else:
             parameters.append({'params': param, 'lr': learning_rate_pretrained})
             

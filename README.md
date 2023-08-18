@@ -18,66 +18,57 @@ This project is licensed under the MIT License - see the [LICENSE](https://githu
 
 ## Usage
 
+### Colorizer app
+
+
 ```python
 import torch
-from denoising_diffusion_pytorch import Unet, GaussianDiffusion
+from AB_diffusion.colorizer_app import ColorizerApp
+from AB_diffusion.ab_denoising_diffusion_pytorch import ABUnet, ABGaussianDiffusion
+from PIL import Image
 
-model = Unet(
+device = "cpu"
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+
+def load(model_name,folder):
+    print(str(folder  + f'/{model_name}'))
+    data = torch.load(str(folder  + f'/{model_name}'), map_location=device)
+    return data
+
+unet = ABUnet(
     dim = 64,
     dim_mults = (1, 2, 4, 8),
-    flash_attn = True
+    out_dim = 2,
+    channels=5
+    )
+# Make sure the args are the same as the model was trained on 
+diffusion_model = ABGaussianDiffusion(
+        unet,
+        image_size = 64,
+        timesteps = 1000,
+        objective = 'pred_v',
+        beta_schedule = 'cosine',
+        min_snr_loss_weight = False,
 )
 
-diffusion = GaussianDiffusion(
-    model,
-    image_size = 128,
-    timesteps = 1000    # number of steps
-)
+model_folder = "path/to/model/dir"
+model_name = "model.pt"
 
-training_images = torch.rand(8, 3, 128, 128) # images are normalized from 0 to 1
-loss = diffusion(training_images)
-loss.backward()
+loaded_data = load(model_name,model_folder)
+diffusion_model.load_state_dict(loaded_data['model'])
+diffusion_model.to(device)
 
-# after a lot of training
 
-sampled_images = diffusion.sample(batch_size = 4)
-sampled_images.shape # (4, 3, 128, 128)
+img = # PIL image
+
+%matplotlib widget
+colorizer = ColorizerApp(img, diffusion_model, device)
+
+colorizer.run()
+
 ```
 
-Or, if you simply want to pass in a folder name and the desired image dimensions, you can use the `Trainer` class to easily train a model.
-
-```python
-from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
-
-model = Unet(
-    dim = 64,
-    dim_mults = (1, 2, 4, 8),
-    flash_attn = True
-)
-
-diffusion = GaussianDiffusion(
-    model,
-    image_size = 128,
-    timesteps = 1000,           # number of steps
-    sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
-)
-
-trainer = Trainer(
-    diffusion,
-    'path/to/your/images',
-    train_batch_size = 32,
-    train_lr = 8e-5,
-    train_num_steps = 700000,         # total training steps
-    gradient_accumulate_every = 2,    # gradient accumulation steps
-    ema_decay = 0.995,                # exponential moving average decay
-    amp = True,                       # turn on mixed precision
-    calculate_fid = True              # whether to calculate fid during training
-)
-
-trainer.train()
-```
-
-Samples and model checkpoints will be logged to `./results` periodically
 
 ## Multi-GPU Training
 At the project root directory, where the training script is, run

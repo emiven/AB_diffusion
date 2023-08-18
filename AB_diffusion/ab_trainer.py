@@ -15,7 +15,9 @@ from tqdm.auto import tqdm
 import torch
 import torch.nn.functional as F
 from torch import nn
+from ignite.metrics import PSNR,SSIM
 import math
+import numpy as np
 
 from AB_diffusion.color_handling import LAB2RGB
 from AB_diffusion.user_hints import get_color_hints
@@ -136,7 +138,7 @@ class ABTrainer(object):
         train_batch_size = 16,
         val_batch_size = 16,
         gradient_accumulate_every = 1,
-        augment_data = True,
+        augment_data = False,
         train_lr = 1e-4,
         train_num_steps = 100000,
         val_num_steps = 1000,
@@ -146,6 +148,7 @@ class ABTrainer(object):
         
         results_folder = './results',
         results_prefix = '',
+        save_images_to_disk = True,
         amp = False,
         mixed_precision_type = 'fp16',
         split_batches = True,
@@ -160,6 +163,7 @@ class ABTrainer(object):
         validation_every = 10000,
         num_image_samples = 25,
         use_tensorboard=False,
+        eval_automatic_generation = True
 
 
 
@@ -172,14 +176,14 @@ class ABTrainer(object):
         self.sample_image_every = sample_image_every
         self.save_every = save_every
         self.validation_every = validation_every
-        num_image_samples = num_image_samples
+        self.num_image_samples = num_image_samples
         
 
         #ab diffusion stuff
         self.hint_generator = hint_generator
         self.hint_color_avg = hint_color_avg
-        
-        
+        self.eval_automatic_generation = eval_automatic_generation
+        self.save_images_to_disk = save_images_to_disk
         
  
         
@@ -241,9 +245,10 @@ class ABTrainer(object):
             self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
             self.ema.to(self.device)
 
-        self.results_folder = Path(results_folder + f'/{results_prefix}-{self.model.objective}-{self.model.sampling_timesteps}-{self.model.beta_schedule}-{self.model.image_size}')
+        self.results_folder = Path(results_folder + f'/{results_prefix}-{self.model.objective}-{self.model.num_timesteps}-{self.model.beta_schedule}-{self.model.image_size}')
         self.results_folder.mkdir(exist_ok = True)
-
+        #make a folder in results folder for images
+        (self.results_folder / 'images').mkdir(exist_ok = True)
 
 
         # prepare model, dataloader, optimizer with accelerator
@@ -257,11 +262,10 @@ class ABTrainer(object):
         #logging
         if use_tensorboard:
             current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-            self.writer = SummaryWriter(log_dir=results_folder + f'/tensorboard_logs/{results_prefix}-{self.model.objective}-{self.model.sampling_timesteps}-{self.model.beta_schedule}-{self.model.image_size}-{current_time}')
+            self.writer = SummaryWriter(log_dir=results_folder + f'/tensorboard_logs/{results_prefix}-{self.model.objective}-{self.model.num_timesteps}-{self.model.beta_schedule}-{self.model.image_size}-{current_time}')
             hyperparameters = {
                 'image_size': self.model.image_size,
                 'timesteps': self.model.num_timesteps,
-                'sampling_timesteps': self.model.sampling_timesteps,
                 'objective': self.model.objective,
                 'beta_schedule': self.model.beta_schedule,
                 'offset_noise_strength': self.model.offset_noise_strength,
@@ -292,7 +296,7 @@ class ABTrainer(object):
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None
                             }
 
-        filename = f"model-{self.model.objective}-{self.model.sampling_timesteps}-{self.model.beta_schedule}-{self.model.image_size}-{milestone}x{self.save_every}steps.pt"
+        filename = f"model-{self.model.objective}-{self.model.num_timesteps}-{self.model.beta_schedule}-{self.model.image_size}-{milestone}x{self.save_every}steps.pt"
         torch.save(data, str(self.results_folder / filename))
 
     def load(self, file_name):
@@ -431,8 +435,15 @@ class ABTrainer(object):
         images_pred_list = []
         images_original_list = []
         images_hint_list = []
+        images_pred_auto_list = []
 
         colorization_loss = 0
+        colorization_loss_auto = 0
+        PSNR_score = 0
+        SSIM_score = 0
+        PSNR_score_automatic = 0
+        SSIM_score_automatic = 0
+
         with torch.inference_mode():
                            
             self.ema.ema_model.eval()
@@ -449,35 +460,90 @@ class ABTrainer(object):
                 conditioning_batch = torch.cat([imgL_batch, hints_batch], dim=1)
 
                 pred_ab = self.ema.ema_model.sample(conditioning_batch)
-                colorization_loss += F.mse_loss(pred_ab, imgAB_batch).item()
-
+                                
+                
                 images_pred_list.append(torch.cat([imgL_batch.to(device), pred_ab], dim=1))                 
                 images_hint_list.append(torch.cat([torch.ones_like(imgL_batch), hints_batch], dim=1))
                 images_original_list.append(torch.cat([imgL_batch, imgAB_batch], dim= 1))
+                
+                
+                
+                if self.eval_automatic_generation:
+                    #generate images with hints being zero tensors
+                    conditioning_batch_no_hints = torch.cat([imgL_batch, torch.zeros_like(hints_batch)], dim=1)
+                    pred_ab_automatic = self.ema.ema_model.sample(conditioning_batch_no_hints)
+                    images_pred_auto_list.append(torch.cat([imgL_batch.to(device), pred_ab_automatic], dim=1))
+
+
+
+
 
 
         images_hint_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_hint_list], dim = 0)
         images_pred_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_pred_list],dim = 0)
         images_original_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_original_list],dim = 0)
+        
+
+        psnr_metric = PSNR(data_range=1.0)
+        ssim_metric = SSIM(data_range=1.0)
 
 
-        hint_grid = utils.make_grid(images_hint_rgb, nrow=int(math.sqrt(self.val_batch_size)))
-        pred_grid = utils.make_grid(images_pred_rgb, nrow=int(math.sqrt(self.val_batch_size)))
-        original_grid = utils.make_grid(images_original_rgb, nrow=int(math.sqrt(self.val_batch_size)))
+        psnr_metric.update((images_pred_rgb, images_original_rgb))
+        ssim_metric.update((images_pred_rgb, images_original_rgb))
+        
+
+
+        colorization_loss = F.mse_loss(images_pred_rgb, images_original_rgb).item()
+        PSNR_score = psnr_metric.compute()
+        SSIM_score = ssim_metric.compute()
+
+
+
+        psnr_metric.reset()
+        ssim_metric.reset()
+        
+        if self.eval_automatic_generation:
+            images_pred_auto_rgb= torch.cat([torch.from_numpy(LAB2RGB(im.cpu())).permute(0,3,1,2).to(self.device) for im in images_pred_auto_list],dim = 0)
+            automatic_grid = utils.make_grid(images_pred_auto_rgb, nrow=int(math.sqrt(self.val_batch_size)), padding=0)
+
+            psnr_metric.update((images_pred_auto_rgb, images_original_rgb))
+            ssim_metric.update((images_pred_auto_rgb, images_original_rgb))
+            SSIM_score_automatic = ssim_metric.compute()
+            PSNR_score_automatic = psnr_metric.compute()
+
+            psnr_metric.reset()
+            ssim_metric.reset()
+            colorization_loss_auto = F.mse_loss(images_pred_auto_rgb, images_original_rgb).item()
+
+
+
+        hint_grid = utils.make_grid(images_hint_rgb, nrow=int(math.sqrt(self.val_batch_size)), padding=0)
+        pred_grid = utils.make_grid(images_pred_rgb, nrow=int(math.sqrt(self.val_batch_size)), padding=0)
+        original_grid = utils.make_grid(images_original_rgb, nrow=int(math.sqrt(self.val_batch_size)), padding=0)
         
         #convert to numpy arrays    
         
         if self.writer is not None:
-            self.writer.add_scalar("Colorization Loss", colorization_loss, self.step)
+            self.writer.add_scalar("Colorization MSE", colorization_loss, self.step)
+            self.writer.add_scalar("Colorization PSNR", PSNR_score, self.step)
+            self.writer.add_scalar("Colorization SSIM", SSIM_score, self.step)
             self.writer.add_image('Colorization', pred_grid.cpu().detach(), self.step)
             self.writer.add_image('Ground Truth', original_grid.cpu().detach(), self.step)
             self.writer.add_image('User Hints', hint_grid.cpu().detach(), self.step)
+            if self.eval_automatic_generation:
+                self.writer.add_scalar("Colorization MSE Automatic", colorization_loss_auto, self.step)
+                self.writer.add_scalar("Colorization PSnR Automatic", PSNR_score_automatic, self.step)
+                self.writer.add_image('Colorization Automatic', automatic_grid, self.step)
+                self.writer.add_scalar("Colorization SSIM Automatic", SSIM_score_automatic, self.step)
         
-        
+        if self.save_images_to_disk:
+            io.imsave(self.results_folder / f'images/image_step{self.step}_pred.png', (pred_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
+            io.imsave(self.results_folder / f'images/image_step{self.step}_original.png', (original_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
+            io.imsave(self.results_folder / f'images/image_step{self.step}_hint.png', (hint_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
+            
+            if self.eval_automatic_generation:
+                io.imsave(self.results_folder / f'images/image_step{self.step}_automatic.png', (automatic_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
 
-        #save the images to results folder
-        io.imsave(self.results_folder / f'images_pred_grid-{self.step // self.sample_image_every}x{self.sample_image_every}.png', (pred_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
-        io.imsave(self.results_folder / f'images_original_grid-{self.step // self.sample_image_every}x{self.sample_image_every}.png', (original_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
-        io.imsave(self.results_folder / f'images_hint_grid-{self.step // self.sample_image_every}x{self.sample_image_every}.png', (hint_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
+
 
 

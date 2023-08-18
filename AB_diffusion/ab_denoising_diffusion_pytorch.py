@@ -238,9 +238,9 @@ class ABUnet(nn.Module):
         self,
         dim,
         init_dim = None,
-        out_dim = None,
+        out_dim = 2,
         dim_mults = (1, 2, 4, 8),
-        channels = 3,
+        channels = 5,
         resnet_block_groups = 8,
         learned_variance = False,
         learned_sinusoidal_cond = False,
@@ -533,7 +533,7 @@ class ABGaussianDiffusion(nn.Module):
             extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
             extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
-
+    
     def predict_noise_from_start(self, x_t, t, x0):
         return (
             (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / \
@@ -752,7 +752,7 @@ class ABGaussianDiffusion(nn.Module):
         x = self.q_sample(x_start = x_start, t = t, noise = noise)
     
 
-        model_out = self.model(x, t,conditioning, None)
+        model_out = self.model(x, t,conditioning)
 
         if self.objective == 'pred_noise':
             target = noise

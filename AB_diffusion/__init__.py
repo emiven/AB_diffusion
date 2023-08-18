@@ -4,3 +4,5 @@ from AB_diffusion.ab_trainer import ABTrainer,ABDataset
 from AB_diffusion.color_handling import plotMinMax,de_normalize_lab,normalize_lab,LAB2RGB,PointColorConversions
 from AB_diffusion.ab_fine_tuner import copy_params,freeze_params,create_adam_optimizer,reinit_params
 from AB_diffusion.colorizer_app import ColorizerApp
+from AB_diffusion.attend import Attend
+from AB_diffusion.ab_v_param_continuous_time_gaussian_diffusion import ABVParamContinuousTimeGaussianDiffusion
