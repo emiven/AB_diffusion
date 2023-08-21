@@ -629,12 +629,14 @@ class ABGaussianDiffusion(nn.Module):
 
         img = torch.randn(shape, device = device)
         imgs = [img]
+        imgs_start = [img]
 
         x_start = None
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
             img, x_start = self.p_sample(img, t,conditioning)
             imgs.append(img)
+            imgs_start.append(x_start)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 

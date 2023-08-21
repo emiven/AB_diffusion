@@ -6,3 +6,4 @@ from AB_diffusion.ab_fine_tuner import copy_params,freeze_params,create_adam_opt
 from AB_diffusion.colorizer_app import ColorizerApp
 from AB_diffusion.attend import Attend
 from AB_diffusion.ab_v_param_continuous_time_gaussian_diffusion import ABVParamContinuousTimeGaussianDiffusion
+from AB_diffusion.evaluator import Evaluator
