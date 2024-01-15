@@ -1,4 +1,4 @@
-from AB_diffusion.user_hints import RandomHintGenerator, get_color_hints
+from AB_diffusion.user_hints import RandomHintGenerator
 from AB_diffusion.ab_denoising_diffusion_pytorch import ABUnet, ABGaussianDiffusion
 from AB_diffusion.ab_trainer import ABTrainer,ABDataset
 from AB_diffusion.color_handling import plotMinMax,de_normalize_lab,normalize_lab,LAB2RGB,PointColorConversions
@@ -6,4 +6,4 @@ from AB_diffusion.ab_fine_tuner import copy_params,freeze_params,create_adam_opt
 from AB_diffusion.colorizer_app import ColorizerApp
 from AB_diffusion.attend import Attend
 from AB_diffusion.ab_v_param_continuous_time_gaussian_diffusion import ABVParamContinuousTimeGaussianDiffusion
-from AB_diffusion.evaluator import Evaluator
+from AB_diffusion.evaluator import Evaluator#,FolderEvaluator

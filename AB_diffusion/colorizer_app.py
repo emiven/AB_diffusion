@@ -9,8 +9,9 @@ import ipywidgets as widgets
 from IPython.display import display
 from AB_diffusion.color_handling import normalize_lab, de_normalize_lab, PointColorConversions
 import kornia.color as kacolor
-
-
+from ema_pytorch import EMA
+from PIL import Image
+import os
 
 class ModelWrapper:
     """
@@ -25,22 +26,40 @@ class ModelWrapper:
         conditioning = torch.cat([input_image_L_tensor, user_hints_tensor], dim=1)
         conditioning = conditioning.repeat(output_count, 1, 1, 1)
         conditioning = normalize_lab(conditioning)
-        output_AB = self.model.sample(conditioning.to(self.device))
+        with torch.inference_mode():
+            self.model.ema_model.eval()
+            output_AB = self.model.ema_model.sample(conditioning.to(self.device))
 
-        self.colorization_LAB_tensor = de_normalize_lab(torch.cat([conditioning[:, :1, :, :], output_AB.to("cpu")], dim=1))
+            self.colorization_LAB_tensor = de_normalize_lab(torch.cat([conditioning[:, :1, :, :], output_AB.to("cpu")], dim=1))
 
 # Handles the image processing and conversions   
 class ImageProcessor:
     """
     A class for handling image operations for the colorizer app.
     """
-    def __init__(self, image):
+    def __init__(self, path,height = 64):
+        #aert if height is divisible by 8
+        assert height % 8 == 0, "Height must be divisible by 8"
+
+        self.image_path = path
+        self.height = height
+        self.init_image(self.image_path)
+        self.point_color_conversions = PointColorConversions()
+
+    def init_image(self,path):
+        image = Image.open(path)
+        if image.mode != 'RGB':
+            # Convert the image to RGB
+            image = image.convert('RGB')
+
+        new_height, new_width = self.get_new_dimensions(image.width, image.height, self.height)
+        image = image.resize((new_width, new_height))
+        
+        self.original_image = image.copy()
         self.image = image.copy()
         self.input_image_LAB_tensor = self.convert_to_lab_tensor(self.image.copy())
         self.input_image_L_tensor = self.input_image_LAB_tensor[:, :1, :, :]
         self.user_hints_tensor = torch.zeros_like(self.input_image_LAB_tensor[:, 1:, :, :])
-        
-        self.point_color_conversions = PointColorConversions()
 
     def convert_to_lab_tensor(self, image):
         return kacolor.rgb_to_lab(transforms.ToTensor()(image).unsqueeze(0))
@@ -77,6 +96,13 @@ class ImageProcessor:
     def get_hinted_image(self):
         temp_lab = torch.cat([self.input_image_L_tensor, self.user_hints_tensor], dim=1)
         return self.lab_tensor_to_image(temp_lab)
+    def get_new_dimensions(self, W, H, h):
+    # Calculate the new width while preserving the aspect ratio
+        w = int((W * h) / H)
+        # Adjust the width to be divisible by 8
+        while w % 8 != 0:
+            w -= 1
+        return h, w
 
 class WidgetManager:
     """
@@ -124,8 +150,8 @@ class WidgetManager:
             self.output_count_slider, 
             self.colorize_button,
             self.clear_button,
-            self.export_button,
-        ])
+            self.export_button        
+            ])
 
         layout = widgets.VBox([image_layout,control_layout])
         display(layout)
@@ -140,6 +166,9 @@ class WidgetManager:
         main_colorized_image_widget = widgets.Image(format='png',description='Colorized Image')
         main_colorized_image_widget.layout = widgets.Layout(object_fit='contain', height='auto', width='300px')
         return main_colorized_image_widget
+    
+    
+
     # Wigdet for the loaded input image
     def create_image_widget(self):
         
@@ -174,33 +203,55 @@ class WidgetManager:
         return clear_button
     
     def create_export_button(self):
-        self.export_filename_text = widgets.Text(value='output.png', description='Filename:')
+        
+        
+        basename = os.path.basename(self.image_processor.image_path)
+        filename = os.path.splitext(basename)[0]
+
+        self.export_filename_text = widgets.Text(value=f'{filename}.png', description='Filename:')
         export_button = widgets.Button(description='Export')
         export_button.on_click(self.on_export_button_click)
         return widgets.VBox([self.export_filename_text, export_button])
+    
+    
+
 
     def on_export_button_click(self, _):
         # Get the image data from the widget
+        directory = "/".join(self.image_processor.image_path.split("/")[:-1])
+        
         image_data = self.main_colorized_image_widget.value
+        input_data = self.image_widget.value
+        original_data = self.image_processor.original_image
 
-        if not image_data:
+
+        if not image_data or not input_data or not original_data:
             print("No image data to export.")
             return
 
         # Convert the image data to a PIL Image
         try:
             image = Image.open(io.BytesIO(image_data))
+            input_image = Image.open(io.BytesIO(input_data))
+            original_image = original_data
         except IOError:
             print("Cannot convert image data to PIL Image. The data may not be in a valid image format.")
             return
 
         # Save the image with the filename from the text widget
         filename = self.export_filename_text.value
+        full_path_colorized = os.path.join(directory, "colorized_" + filename)
+        full_path_input = os.path.join(directory, "input_" + filename)
+        full_path_original = os.path.join(directory, "original_" + filename)
+
+
         try:
-            image.save(filename)
-            print(f"Image exported as {filename}.")
+            image.save(full_path_colorized)
+            input_image.save(full_path_input)   
+            original_image.save(full_path_original)         
+            print(f"Images exported to {directory}.")
         except IOError:
-            print(f"Cannot save image as {filename}.")
+            print(f"Cannot save images to {directory}.")
     
     # Additional image wigdets for multiple colorizations, attached with an click event for selection
     def create_colorized_image_widget(self, image_bytes):
@@ -271,8 +322,8 @@ class ColorizerApp:
     """
     A class for running the colorizer app.
     """ 
-    def __init__(self, image, model, device="cpu"):
-        self.image_processor = ImageProcessor(image)
+    def __init__(self, path, model,height, device="cpu"):
+        self.image_processor = ImageProcessor(path,height)
         self.model_wrapper = ModelWrapper(model, device)
         self.widget_manager = WidgetManager(self.image_processor, self.model_wrapper)
 

@@ -1,207 +1,197 @@
-
-from AB_diffusion.ab_trainer import ABDataset
-from torch.utils.data import DataLoader
 import torch
-from AB_diffusion.user_hints import  get_color_hints 
-from AB_diffusion.color_handling import LAB2RGB
-from tqdm.auto import tqdm
 import torch.nn.functional as F
-from ignite.metrics import PSNR, SSIM, InceptionScore, FID, MeanSquaredError
+from skimage import io as skio
 
-import csv
+import torchmetrics
+from tqdm.auto import tqdm
+from torch.utils.data import DataLoader
+from AB_diffusion.color_handling import normalize_lab, de_normalize_lab, LAB2RGB,plotMinMax
+from AB_diffusion.ab_trainer import ABDataset
+from torchvision import transforms as T, utils
 import os
 from pathlib import Path
+import csv
+import math
+from torchmetrics.functional.image.lpips import learned_perceptual_image_patch_similarity
+from torchmetrics.functional.image import structural_similarity_index_measure
+from torchmetrics.functional.image import peak_signal_noise_ratio
 
 
 
+
+# Helper functions
+def exists(x):
+    return x is not None
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if callable(d) else d
+
+def cast_tuple(t, length = 1):
+    if isinstance(t, tuple):
+        return t
+    return ((t,) * length)
+
+def identity(t, *args, **kwargs):
+    return t
 
 def cycle(dl):
     while True:
         for data in dl:
             yield data
+def num_to_groups(num, divisor):
+    groups = num // divisor
+    remainder = num % divisor
+    arr = [divisor] * groups
+    if remainder > 0:
+        arr.append(remainder)
+    return arr
 
-
+def has_int_squareroot(num):
+    return (math.sqrt(num) ** 2) == num
 class Evaluator:
-    def __init__(self,
-                  model,
-                  model_name = "model", 
-                  dataset = None, 
-                  num_steps = 1000,
-                  compute_every = 100,
-                  batch_size  = 32, 
-                  device = "cpu",
-                  image_size = 64,
-                    augment_data = False,
-                    hint_generator = None,
+    def __init__(self, model, model_name="model", dataset=None, num_steps=1000, display_every=100,compute_every = 10, batch_size=32, 
+                 device="cpu", image_size=64, augment_data=False, hint_generator=None, display_images=False, folder=None,suffix = ""):
+        self.metrics_storage = {}
 
-                    folder = None
-                  ):
-        
-        
-        self.metrics_storage = {
-            "Step": [],
-            "MSE": [],
-            "PSNR": [],
-            "SSIM": [],
-            "Inception Score": [],
-            "FID": [],
-            "Automatic MSE": [],
-            "Automatic PSNR": [],
-            "Automatic SSIM": [],
-            "Automatic Inception Score": [],
-            "Automatic FID": []
-            
-        }
+        self.compute_every = compute_every
+        self.hint_levels = hint_generator.uniform_hint_range if hint_generator else [0]
+        for hint in self.hint_levels:
+            self.metrics_storage[f"PSNR@{hint}"] = []
+            self.metrics_storage[f"SSIM@{hint}"] = []
+            self.metrics_storage[f"LPIPS@{hint}"] = []
+            self.metrics_storage[f"MSE@{hint}"] = []
 
 
-        self.folder = Path(folder + f'/experiments')
-        self.folder.mkdir(exist_ok = True)
+        self.model_name = model_name
+        self.display_images = display_images
+        model_folder_name = self.model_name.replace('.pt', '')
+        self.folder = Path(folder + f'/experiments/{suffix + model_folder_name}')
+        self.folder.mkdir(parents=True, exist_ok=True)
+        (self.folder / 'images').mkdir(exist_ok=True)
 
         self.num_steps = num_steps
         self.device = device
         self.model = model
-        self.model_name = model_name
         self.image_size = image_size
         self.batch_size = batch_size 
         self.hint_generator = hint_generator
-        self.compute_every = compute_every
-        print("loading datasets:")     
-        self.dataset = ABDataset(dataset,self.image_size, augment_data = augment_data)
-        self.dataloader = cycle(DataLoader(self.dataset, batch_size = self.batch_size, shuffle = True, pin_memory = True))
+        self.display_every = display_every
 
-        # Initialize metrics from Ignite
-        self.mse_metric = MeanSquaredError()
-        self.psnr_metric = PSNR(data_range=1.0)
-        self.ssim_metric = SSIM(data_range=1.0)
-        self.inception_score_metric = InceptionScore(device=self.device)
-        self.fid_metric = FID(device=self.device)
+        self.dataset = ABDataset(dataset, self.image_size, augment_data=augment_data)
+        self.dataloader = cycle(DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, pin_memory=True))
         
-        self.a_mse_metric = MeanSquaredError()
-        self.a_psnr_metric = PSNR(data_range=1.0)
-        self.a_ssim_metric = SSIM(data_range=1.0)
-        self.a_inception_score_metric = InceptionScore(device=self.device)
-        self.a_fid_metric = FID(device=self.device)
 
         
         self.batch_count = 0
         self.step = 1 
 
 
-    def sample_batch(self, imgL, imgAB):
-        self.model.eval()
-
-        # Sampling with hints
-        masks = self.hint_generator(imgL.shape[0])
-        hints = get_color_hints(imgAB, masks, True, self.device)
-
+    def sample_batch(self, imgL, imgAB,hints):
+        self.model.ema_model.eval()
         conditioning_batch = torch.cat([imgL, hints], dim=1)
+        
         with torch.no_grad():
-            pred_ab_hints = self.model.sample(conditioning_batch)
+            pred_ab_hints = self.model.ema_model.sample(conditioning_batch)
 
-        # Automatic generation
-        conditioning_batch_no_hints = torch.cat([imgL, torch.zeros_like(hints)], dim=1)
-        with torch.no_grad():
-            pred_ab_automatic = self.model.sample(conditioning_batch_no_hints)
-
-        # Convert LAB to RGB
         images_pred_rgb = torch.from_numpy(LAB2RGB(torch.cat([imgL, pred_ab_hints], dim=1).cpu())).permute(0, 3, 1, 2).to(self.device)
         images_original_rgb = torch.from_numpy(LAB2RGB(torch.cat([imgL, imgAB], dim=1).cpu())).permute(0, 3, 1, 2).to(self.device)
-        images_pred_auto_rgb = torch.from_numpy(LAB2RGB(torch.cat([imgL, pred_ab_automatic], dim=1).cpu())).permute(0, 3, 1, 2).to(self.device)
-        # Resize for Inception model
-        images_pred_rgb = F.interpolate(images_pred_rgb, size=(299, 299), mode='bilinear', align_corners=False)
-        images_original_rgb = F.interpolate(images_original_rgb, size=(299, 299), mode='bilinear', align_corners=False)
-        images_pred_auto_rgb = F.interpolate(images_pred_auto_rgb, size=(299, 299), mode='bilinear', align_corners=False)
+        images_hint_rgb = torch.from_numpy(LAB2RGB(torch.cat([imgL, hints], dim=1).cpu())).permute(0, 3, 1, 2).to(self.device)
+        
+
+        if self.display_images and self.step % self.display_every == 0:
+            hint_grid = utils.make_grid(images_hint_rgb, nrow=int(math.sqrt(self.batch_size)), padding=0)
+            pred_grid = utils.make_grid(images_pred_rgb, nrow=int(math.sqrt(self.batch_size)), padding=0)
+            original_grid = utils.make_grid(images_original_rgb, nrow=int(math.sqrt(self.batch_size)), padding=0)
+            
+            skio.imsave(self.folder / f'images/image_step{self.step}_pred.png', (pred_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
+            skio.imsave(self.folder / f'images/image_step{self.step}_original.png', (original_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
+            skio.imsave(self.folder / f'images/image_step{self.step}_hint.png', (hint_grid.permute(1,2,0).cpu().detach().numpy()*255).astype('uint8'))
 
         return {
             "images_pred_rgb": images_pred_rgb,
             "images_original_rgb": images_original_rgb,
-            "images_pred_auto_rgb": images_pred_auto_rgb
         }
 
-    def update_metrics(self, images_pred_rgb, images_original_rgb, images_pred_auto_rgb):
+    def update_metrics(self, images_pred_rgb, images_original_rgb, num_hints_list=None):
+        B, C, H, W = images_pred_rgb.shape
 
 
-        # Metrics for colorized images with hints
-        self.mse_metric.update((images_pred_rgb, images_original_rgb))
-        self.psnr_metric.update((images_pred_rgb, images_original_rgb))
-        self.ssim_metric.update((images_pred_rgb, images_original_rgb))
-        self.inception_score_metric.update(images_pred_rgb)
-        self.fid_metric.update((images_pred_rgb, images_original_rgb))
+        for idx in range(B):  # B is the batch size
 
+            # throw error if num_hints_list[idx] is not in self.hint_generator.uniform_hint_range
+            if num_hints_list[idx] not in self.hint_levels:
+                raise ValueError(f"num_hints_list[idx] is not in self.hint_generator.uniform_hint_range: {num_hints_list[idx]}")
 
-        # Metrics for automatically colorized images
-        self.a_mse_metric.update((images_pred_auto_rgb, images_original_rgb))
-        self.a_psnr_metric.update((images_pred_auto_rgb, images_original_rgb))
-        self.a_ssim_metric.update((images_pred_auto_rgb, images_original_rgb))
-        self.a_inception_score_metric.update(images_pred_auto_rgb)
-        self.a_fid_metric.update((images_pred_auto_rgb, images_original_rgb))
-    def compute_metrics(self):
-        # Metrics for colorized images with hints
-        self.metrics_storage["Step"].append(self.step)
-        self.metrics_storage["MSE"].append(self.mse_metric.compute())
-        self.metrics_storage["PSNR"].append(self.psnr_metric.compute())
-        self.metrics_storage["SSIM"].append(self.ssim_metric.compute())
-        inception_score = self.inception_score_metric.compute()
-        self.metrics_storage["Inception Score"].append(inception_score)
-        self.metrics_storage["FID"].append(self.fid_metric.compute())
-        
-        # Metrics for automatically colorized images
-        self.metrics_storage["Automatic MSE"].append(self.a_mse_metric.compute())
-        self.metrics_storage["Automatic PSNR"].append(self.a_psnr_metric.compute())
-        self.metrics_storage["Automatic SSIM"].append(self.a_ssim_metric.compute())
-        inception_score_auto = self.a_inception_score_metric.compute()
-        self.metrics_storage["Automatic Inception Score"].append(inception_score_auto)
-        self.metrics_storage["Automatic FID"].append(self.a_fid_metric.compute())
+            image_pred = images_pred_rgb[idx].unsqueeze(0)
+            image_orig = images_original_rgb[idx].unsqueeze(0)
+            num_hints = num_hints_list[idx]
 
-        # Reset metrics
-        self.mse_metric.reset()
-        self.psnr_metric.reset()
-        self.ssim_metric.reset()
-        self.inception_score_metric.reset()
-        self.fid_metric.reset()
-        self.a_mse_metric.reset()
-        self.a_psnr_metric.reset()
-        self.a_ssim_metric.reset()
-        self.a_inception_score_metric.reset()
-        self.a_fid_metric.reset()
+            # Compute and store MSE, PSNR, SSIM, LPIPS for the specific hint level
+                    # Metrics
+            
+            mse_value = F.mse_loss(image_pred, image_orig).item()
+            psnr_value = peak_signal_noise_ratio(image_pred, image_orig,data_range =  (0,1))
+            ssim_value = structural_similarity_index_measure(image_pred, image_orig,data_range =  (0,1))
+            lpips_value = learned_perceptual_image_patch_similarity(image_pred.to("cpu"), image_orig.to("cpu"),net_type='alex',normalize = "True").to(self.device)
+        # ... (rest of your code for calculating metrics for individual image)
 
-        
-    
-    def save_metrics_to_csv(self):
-        csv_file = str(self.folder / f"{self.model_name}.csv")
+            num_hints = num_hints_list[idx]
+            self.metrics_storage[f"MSE@{num_hints}"].append( mse_value)
+            self.metrics_storage[f"PSNR@{num_hints}"].append( psnr_value.item())
+            self.metrics_storage[f"SSIM@{num_hints}"].append( ssim_value.item())
+            self.metrics_storage[f"LPIPS@{num_hints}"].append( lpips_value.item())
 
-        # Check if file exists, if not, write headers
-        if not os.path.exists(csv_file):
-            with open(csv_file, 'w') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=self.metrics_storage.keys())
-                writer.writeheader()
+    def save_mean_to_csv(self):
+        # Create the CSV file if it doesn't exist
+        csv_file = self.folder / "metrics.csv"
+        if not csv_file.exists():
+            with open(csv_file, "w", newline='') as f:
+                writer = csv.writer(f)
+                # Write the header row
+                header = ["Step"]
+                for hint in self.hint_levels:
+                    header.extend([f"PSNR@{hint}", f"SSIM@{hint}", f"LPIPS@{hint}", f"MSE@{hint}"])
+                writer.writerow(header)
 
-        # Append the latest metrics to the csv
-        with open(csv_file, 'a') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=self.metrics_storage.keys())
-            last_metrics = {key: self.metrics_storage[key][-1] for key in self.metrics_storage}
-            writer.writerow(last_metrics)
-    
-    def average_metrics(self):
-        return {key: sum(self.metrics_storage[key]) / len(self.metrics_storage[key]) for key in self.metrics_storage}
-
+        # Compute the averages and write to CSV
+        with open(csv_file, "a", newline='') as f:
+            writer = csv.writer(f)
+            row = [self.step]
+            for hint in self.hint_levels:
+                for metric in ["PSNR", "SSIM", "LPIPS", "MSE"]:
+                    key = f"{metric}@{hint}"
+                    values = self.metrics_storage[key]
+                    avg = sum(values) / len(values) if values else float('nan')
+                    row.append(avg)
+                    # Reset the metrics for this hint level
+                    self.metrics_storage[key] = []
+            writer.writerow(row)
 
     def evaluate_model(self):
-        
-        with tqdm(initial = self.step, total = self.num_steps) as pbar: 
+        with tqdm(initial=self.step, total=self.num_steps) as pbar: 
             while self.step <= self.num_steps:
-                pbar.set_description(f"Step {self.step}/{self.num_steps}")
-                imgL,imgAB = next(self.dataloader)
-                sampled_images = self.sample_batch(imgL.to(self.device), imgAB.to(self.device))
-                self.update_metrics(sampled_images["images_pred_rgb"], sampled_images["images_original_rgb"], sampled_images["images_pred_auto_rgb"])
-                if self.step % self.compute_every == 0:
-                    self.compute_metrics()
-                    self.save_metrics_to_csv()
-                    
-                    pbar.set_postfix(self.average_metrics())
-                self.step += 1
-
+            # Initialize metrics for the step with NaN
             
+                imgL, imgAB = next(self.dataloader)
+                imgL = imgL.to(self.device)
+                imgAB = imgAB.to(self.device)
+                if self.hint_generator:
+                    hints, num_hints_list = self.hint_generator.generate_hints(imgAB)
+                    hints = hints.to(self.device)
+                else:
+                    num_hints_list = [0] * imgL.shape[0]  # Default to 0 hints
+                
+                sampled_images = self.sample_batch(imgL.to(self.device), imgAB.to(self.device),hints)
+                self.update_metrics(sampled_images["images_pred_rgb"], sampled_images["images_original_rgb"], num_hints_list)
+            
+            # Save mean metrics every compute_every steps
+                if self.step % self.compute_every == 0:
+                    self.save_mean_to_csv()
 
-
-
+                pbar.update(1)
+                self.step += 1
+        
+        # Insert NaNs for any remaining metrics after the loop ends
+        self.save_mean_to_csv()

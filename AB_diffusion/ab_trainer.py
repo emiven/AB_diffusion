@@ -3,13 +3,13 @@ from multiprocessing import cpu_count
 from pathlib import Path
 from random import random
 
-from accelerate import Accelerator
+#from accelerate import Accelerator
 from ema_pytorch import EMA
 from kornia.color import rgb_to_lab
 from skimage import io
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms as T, utils
 from tqdm.auto import tqdm
 import torch
@@ -20,7 +20,6 @@ import math
 import numpy as np
 
 from AB_diffusion.color_handling import LAB2RGB
-from AB_diffusion.user_hints import get_color_hints
 
 # This file is based on the code from the Denoising Diffusion Probabilistic Model Pytorch implementation by Phil Wang
 # Specifically the trainer class and relevant helpers
@@ -89,10 +88,14 @@ class ABDataset(Dataset):
         
         self.transform = T.Compose([
             T.Lambda(self.set_rgb_format),
-            T.Resize(image_size),
-            T.ColorJitter(brightness=0.0, contrast=0.0, saturation=0.0, hue=0.4) if augment_data else nn.Identity(),
             T.RandomHorizontalFlip() if augment_data else nn.Identity(),
             T.RandomVerticalFlip() if augment_data else nn.Identity(),
+            T.RandomRotation(degrees=(0, 180)) if augment_data else nn.Identity(),
+            T.Resize(image_size),
+            #T.RandomCrop(size=(image_size, image_size)) if augment_data else nn.Identity(),
+            T.ColorJitter(brightness=0.0, contrast=0.0, saturation=0.0, hue=0.3) if augment_data else nn.Identity(),
+
+            
             T.CenterCrop(image_size),
             T.ToTensor(),
             T.Lambda(rgb_to_lab)
@@ -299,19 +302,25 @@ class ABTrainer(object):
         filename = f"model-{self.model.objective}-{self.model.num_timesteps}-{self.model.beta_schedule}-{self.model.image_size}-{milestone}x{self.save_every}steps.pt"
         torch.save(data, str(self.results_folder / filename))
 
-    def load(self, file_name):
+    def load(self, path):
         accelerator = self.accelerator
         device = accelerator.device
 
-        data = torch.load(str(self.results_folder / f'{file_name}'), map_location=device)
+        data = torch.load(str(path), map_location=device)
 
         model = self.accelerator.unwrap_model(self.model)
+
+        
         model.load_state_dict(data['model'])
 
         self.step = data['step']
+        
         self.opt.load_state_dict(data['opt'])
         print("model loaded")
+        
         if self.accelerator.is_main_process:
+
+            
             self.ema.load_state_dict(data["ema"])
 
 
@@ -337,8 +346,8 @@ class ABTrainer(object):
 
                     with self.accelerator.autocast():
 
-                        hint_masks = self.hint_generator(imgAB.shape[0])
-                        hints = get_color_hints(imgAB, hint_masks, avg_color = self.hint_color_avg, device = device).to(device)
+
+                        hints = self.hint_generator.generate_hints(imgAB).to(device)
                         conditioning = torch.cat([imgL.to(device), hints], dim = 1)
 
                             
@@ -405,8 +414,8 @@ class ABTrainer(object):
                     conditioning = imgL.to(device)
                     imgAB = imgAB.to(device)
                     with self.accelerator.autocast():
-                        hint_masks = self.hint_generator(imgAB.shape[0])
-                        hints = get_color_hints(imgAB, hint_masks, avg_color = self.hint_color_avg, device = device).to(device)
+                        hints = self.hint_generator.generate_hints(imgAB).to(device)
+
                         conditioning = torch.cat([conditioning, hints], dim = 1)
                         loss = self.ema.ema_model(imgAB,conditioning = conditioning)
                         
@@ -451,8 +460,9 @@ class ABTrainer(object):
 
             for i, b in enumerate(batches):
                 imgL,imgAB = next(self.dl_val)
-                masks= self.hint_generator(imgL.shape[0])
-                hints = get_color_hints(imgAB,masks,self.hint_color_avg,device)
+                
+                
+                hints = self.hint_generator.generate_hints(imgAB).to(device)
                 
                 hints_batch = hints[:b].to(device)
                 imgL_batch = imgL[:b].to(device)
@@ -463,7 +473,7 @@ class ABTrainer(object):
                                 
                 
                 images_pred_list.append(torch.cat([imgL_batch.to(device), pred_ab], dim=1))                 
-                images_hint_list.append(torch.cat([torch.ones_like(imgL_batch), hints_batch], dim=1))
+                images_hint_list.append(torch.cat([imgL_batch, hints_batch], dim=1))
                 images_original_list.append(torch.cat([imgL_batch, imgAB_batch], dim= 1))
                 
                 
