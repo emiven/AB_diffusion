@@ -1,6 +1,6 @@
-<img src="./images/denoising-diffusion.png" width="500px"></img>
+<img src="./images/UI EXAMPLE.png" width="500px"></img>
 
-## AB Denoising Diffusion Probabilistic Model, For Image Colorisation
+## AB Denoising Diffusion Probabilistic Model, For Image Colorisation, fine tuned for SEM images
 
 This project is a Conditional Denoising Diffusion Probabilistic Model for image colorization with user hints, based on the code from the Denoising Diffusion Probabilistic Model Pytorch implementation by Phil Wang, [LINK](https://github.com/lucidrains/denoising-diffusion-pytorch/tree/main)
 
@@ -8,6 +8,12 @@ This project is a Conditional Denoising Diffusion Probabilistic Model for image 
  - Training script for diffusion model
  - Jupyter Notebook based colorization app
  - Some helpers for fine tuning pretrained models, they should work fine with pretrained models from the DDIM implementation of Phil Wang
+
+<img src="./images/morpho chinese paper.png" width="500px"></img>
+
+<img src="./images/comp mountainmaps.png" width="500px"></img>
+
+<img src="./images/morpho maize and larvae.png" width="500px"></img>
 
 
 ## License
