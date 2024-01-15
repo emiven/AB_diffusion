@@ -1,4 +1,4 @@
-<img src="./images/UI EXAMPLE.png" width="500px"></img>
+<img src=".AB-diffusion/images/UI EXAMPLE.png" width="500px"></img>
 
 ## AB Denoising Diffusion Probabilistic Model, For Image Colorisation, fine tuned for SEM images
 
@@ -9,11 +9,11 @@ This project is a Conditional Denoising Diffusion Probabilistic Model for image 
  - Jupyter Notebook based colorization app
  - Some helpers for fine tuning pretrained models, they should work fine with pretrained models from the DDIM implementation of Phil Wang
 
-<img src="./images/morpho chinese paper.png" width="500px"></img>
+<img src=".AB-diffusion/images/morpho chinese paper.png" width="500px"></img>
 
-<img src="./images/comp mountainmaps.png" width="500px"></img>
+<img src=".AB-diffusion/images/comp mountainmaps.png" width="500px"></img>
 
-<img src="./images/morpho maize and larvae.png" width="500px"></img>
+<img src=".AB-diffusion/images/morpho maize and larvae.png" width="500px"></img>
 
 
 ## License
