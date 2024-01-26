@@ -1,4 +1,4 @@
-<img src=".images/UI EXAMPLE.png" width="500px"></img>
+<img src="images/UI EXAMPLE.png" width="500px"></img>
 
 ## AB Denoising Diffusion Probabilistic Model, For Image Colorisation, fine tuned for SEM images
 
