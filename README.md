@@ -14,6 +14,7 @@ This project is a Conditional Denoising Diffusion Probabilistic Model for image 
 <img src="images/comp mountainmaps.png" width="500px"></img>
 
 <img src="images/morpho maize and larvae.png" width="500px"></img>
+*note the grey areas are populated with grey hints
 
 
 ## License
